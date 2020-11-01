@@ -22,7 +22,7 @@
 // `construct_runtime!` does a lot of recursion and requires us to increase the limit to 256.
 #![recursion_limit="256"]
 
-use sp_std::prelude::*;
+use sp_std::{marker::PhantomData, prelude::*};
 
 use frame_support::{
 	construct_runtime, parameter_types, debug, RuntimeDebug,
@@ -31,14 +31,17 @@ use frame_support::{
 		constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight, WEIGHT_PER_SECOND},
 	},
 	traits::{Currency, Imbalance, KeyOwnerProofSystem, OnUnbalanced, Randomness, LockIdentifier},
+	ConsensusEngineId,
 };
 use frame_system::{EnsureRoot, EnsureOneOf};
-use frame_support::traits::InstanceFilter;
+use frame_support::traits::{FindAuthor, InstanceFilter};
 use codec::{Encode, Decode};
 use sp_core::{
-	crypto::KeyTypeId,
+	crypto::{KeyTypeId, Public},
 	u32_trait::{_1, _2, _3, _4},
 	OpaqueMetadata,
+	H160,
+	U256
 };
 pub use node_primitives::{AccountId, Signature};
 use node_primitives::{AccountIndex, Balance, BlockNumber, Hash, Index, Moment};
@@ -46,6 +49,7 @@ use sp_api::impl_runtime_apis;
 use sp_runtime::{
 	Permill, Perbill, Perquintill, Percent, ApplyExtrinsicResult,
 	impl_opaque_keys, generic, create_runtime_str, ModuleId, FixedPointNumber,
+	MultiSigner
 };
 use sp_runtime::curve::PiecewiseLinear;
 use sp_runtime::transaction_validity::{TransactionValidity, TransactionSource, TransactionPriority};
@@ -102,14 +106,14 @@ pub fn wasm_binary_unwrap() -> &'static [u8] {
 
 /// Runtime version.
 pub const VERSION: RuntimeVersion = RuntimeVersion {
-	spec_name: create_runtime_str!("node"),
-	impl_name: create_runtime_str!("substrate-node"),
-	authoring_version: 10,
+	spec_name: create_runtime_str!("spec"),
+	impl_name: create_runtime_str!("impl"),
+	authoring_version: 1,
 	// Per convention: if the runtime behavior changes, increment spec_version
 	// and set impl_version to 0. If only runtime
 	// implementation changes and behavior does not, then leave spec_version as
 	// is and increment impl_version.
-	spec_version: 259,
+	spec_version: 1,
 	impl_version: 0,
 	apis: RUNTIME_API_VERSIONS,
 	transaction_version: 1,
@@ -473,9 +477,9 @@ impl pallet_staking::Trait for Runtime {
 }
 
 parameter_types! {
-	pub const LaunchPeriod: BlockNumber = 28 * 24 * 60 * MINUTES;
-	pub const VotingPeriod: BlockNumber = 28 * 24 * 60 * MINUTES;
-	pub const FastTrackVotingPeriod: BlockNumber = 3 * 24 * 60 * MINUTES;
+	pub const LaunchPeriod: BlockNumber = 7 * 24 * 60 * MINUTES;
+	pub const VotingPeriod: BlockNumber = 7 * 24 * 60 * MINUTES;
+	pub const FastTrackVotingPeriod: BlockNumber = 1 * 24 * 60 * MINUTES;
 	pub const InstantAllowed: bool = true;
 	pub const MinimumDeposit: Balance = 100 * DOLLARS;
 	pub const EnactmentPeriod: BlockNumber = 30 * 24 * 60 * MINUTES;
@@ -887,6 +891,133 @@ impl pallet_vesting::Trait for Runtime {
 	type WeightInfo = weights::pallet_vesting::WeightInfo;
 }
 
+pub struct GasPriceCalculator;
+
+impl pallet_evm::FeeCalculator for GasPriceCalculator {
+	fn min_gas_price() -> U256 {
+		U256::from(1)
+	}
+}
+
+impl pallet_evm::Trait for Runtime {
+	type FeeCalculator = GasPriceCalculator;
+	type CallOrigin = pallet_evm::EnsureAddressTruncated;
+	type WithdrawOrigin = pallet_evm::EnsureAddressTruncated;
+	type AddressMapping = pallet_evm::HashedAddressMapping<BlakeTwo256>;
+	type Currency = Balances;
+	type Event = Event;
+	type Precompiles = (
+		pallet_evm::precompiles::ECRecover,
+		pallet_evm::precompiles::Sha256,
+		pallet_evm::precompiles::Ripemd160,
+		pallet_evm::precompiles::Identity,
+	);
+	type ChainId = pallet_evm::SystemChainId;
+}
+
+pub struct EthereumFindAuthor<F>(PhantomData<F>);
+impl<F: FindAuthor<u32>> FindAuthor<H160> for EthereumFindAuthor<F>
+{
+	fn find_author<'a, I>(digests: I) -> Option<H160> where
+		I: 'a + IntoIterator<Item=(ConsensusEngineId, &'a [u8])>
+	{
+		if let Some(author_index) = F::find_author(digests) {
+			let authority_id = Babe::authorities()[author_index as usize].clone();
+			return Some(H160::from_slice(&authority_id.0.to_raw_vec()[4..24]));
+		}
+		None
+	}
+}
+
+impl pallet_ethereum::Trait for Runtime {
+	type Event = Event;
+	type FindAuthor = EthereumFindAuthor<Babe>;
+}
+
+impl pallet_did::Trait for Runtime {
+	type Event = Event;
+	type Public = MultiSigner;
+	type Signature = Signature;
+}
+
+impl pallet_fungible::Trait for Runtime {
+	type Event = Event;
+	type TokenBalance = u64;
+	type TokenId = u64;
+}
+
+impl pallet_swaps::Trait for Runtime {
+	type Event = Event;
+	type SwapId = u64;
+	type Currency = Balances;
+}
+
+parameter_types! {
+	pub const MaxMissionTokensSupply: u128 = 7_777_777_777;
+}
+
+impl pallet_mission_tokens::Trait for Runtime {
+	type Event = Event;
+	type Balance = u128;
+	type MissionTokenId = u32;
+	type ExistentialDeposit = ExistentialDeposit;
+	type AccountStore = pallet_mission_tokens::Module<Runtime>;
+	type AccountData = pallet_mission_tokens::AccountData<Self::Balance>;
+	type OnNewAccount = ();
+	type MaxMissionTokensSupply = MaxMissionTokensSupply;
+}
+
+impl pallet_social_treasury::Trait for Runtime {
+	type ApproveOrigin = EnsureOneOf<
+		AccountId,
+		EnsureRoot<AccountId>,
+		pallet_collective::EnsureMembers<_4, AccountId, CouncilCollective>
+	>;
+	type RejectOrigin = EnsureOneOf<
+		AccountId,
+		EnsureRoot<AccountId>,
+		pallet_collective::EnsureMembers<_2, AccountId, CouncilCollective>
+	>;
+	type Tippers = Elections;
+	type TipCountdown = TipCountdown;
+	type TipFindersFee = TipFindersFee;
+	type TipReportDepositBase = TipReportDepositBase;
+	type DataDepositPerByte = DataDepositPerByte;
+	type Event = Event;
+	type OnSlash = ();
+	type ProposalBond = ProposalBond;
+	type ProposalBondMinimum = ProposalBondMinimum;
+	type SpendPeriod = SpendPeriod;
+	type Burn = Burn;
+	type BountyDepositBase = BountyDepositBase;
+	type BountyDepositPayoutDelay = BountyDepositPayoutDelay;
+	type BountyUpdatePeriod = BountyUpdatePeriod;
+	type BountyCuratorDeposit = BountyCuratorDeposit;
+	type BountyValueMinimum = BountyValueMinimum;
+	type MaximumReasonLength = MaximumReasonLength;
+	type BurnDestination = ();
+	type WeightInfo = weights::pallet_social_treasury::WeightInfo;
+}
+
+impl pallet_validator_registry::Trait for Runtime {
+	type Event = Event;
+}
+
+parameter_types! {
+	pub const MinUsernameLength: u32 = 5;
+	pub const MaxUsernameLength: u32 = 50;
+}
+
+impl pallet_username_registry::Trait for Runtime {
+	type Event = Event;
+	type MaxRegistrars = MaxRegistrars;
+	type MinUsernameLength = MinUsernameLength;
+	type MaxUsernameLength = MaxUsernameLength;
+	type ForceOrigin = EnsureRootOrHalfCouncil;
+	type RegistrarOrigin = EnsureRootOrHalfCouncil;
+	type WeightInfo = weights::pallet_username_registry::WeightInfo;
+}
+
 construct_runtime!(
 	pub enum Runtime where
 		Block = Block,
@@ -925,6 +1056,15 @@ construct_runtime!(
 		Scheduler: pallet_scheduler::{Module, Call, Storage, Event<T>},
 		Proxy: pallet_proxy::{Module, Call, Storage, Event<T>},
 		Multisig: pallet_multisig::{Module, Call, Storage, Event<T>},
+		Evm: pallet_evm::{Module, Call, Storage, Event<T>},
+		Ethereum: pallet_ethereum::{Module, Call, Storage, Event, Config, ValidateUnsigned},
+		Did: pallet_did::{Module, Call, Storage, Event<T>},
+		Fungible: pallet_fungible::{Module, Call, Storage, Event<T>},
+		Swaps: pallet_swaps::{Module, Call, Storage, Event<T>},
+		MissionTokens: pallet_mission_tokens::{Module, Call, Storage, Event<T>},
+		SocialTreasury: pallet_social_treasury::{Module, Call, Storage, Event<T>},
+		ValidatorRegistry: pallet_validator_registry::{Module, Call, Storage, Event<T>},
+		UsernameRegistry: pallet_username_registry::{Module, Call, Storage, Event<T>},
 	}
 );
 

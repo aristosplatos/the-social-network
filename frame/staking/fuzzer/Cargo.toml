@@ -6,7 +6,7 @@ publish = false
 edition = "2018"
 license = "Apache-2.0"
 homepage = "https://substrate.dev"
-repository = "https://github.com/paritytech/substrate/"
+repository = "https://github.com/aristosplatos/the-social-network/"
 description = "FRAME pallet staking fuzzing"
 
 [package.metadata.docs.rs]
